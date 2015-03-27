@@ -21,8 +21,9 @@ type StreamConn struct {
 	ForwardConnection net.Conn
 	StreamID uint64
 	PacketID uint64
-	LastRecivedPacketID uint64
+	LastForwardedPacketID uint64
 	pc net.PacketConn
+	PacketList map[uint64][]byte
 }
 func (sc * StreamConn) Write(b []byte) (n int, err error){
 	n, err = sc.pc.WriteTo(b, sc.LastRemotePacAdd)
@@ -30,7 +31,7 @@ func (sc * StreamConn) Write(b []byte) (n int, err error){
 }
 
 type DataStream struct {
-	ConfStream StreamConn
+	ConfStream * StreamConn
 }
 func (Ds * DataStream) Write(b []byte) (n int, err error){
 	
@@ -104,7 +105,7 @@ func RunServer() {
 	//Listen for new conenctions from clients
 	//l, err := ListenStream(":5356")
 	var err error
-	ServerUdpListener, err = net.ListenPacket("udp", ":5356")
+	ServerUdpListener, err = net.ListenPacket("udp", ":5453")
 	if err != nil {
 		fmt.Println("Error creating packet listener:", err.Error())
 		return
@@ -115,9 +116,9 @@ func RunServer() {
 	//Connection identifier
 	var ConnectionID uint64 = 50
 	
-	StreamMap := map[uint64]StreamConn{}
+	StreamMap := map[uint64]*StreamConn{}
 
-	fmt.Println("Server Listening on :5356")
+	fmt.Println("Server Listening on :5453")
 	for {
 		// Listen for an incoming Packet
 		recivedData := make([]byte, DATA_PACKET_SIZE) //Big enogh to get an full mtu
@@ -140,7 +141,7 @@ func RunServer() {
 			
 			fmt.Println("Client Requesting new Stream Sending them stream id:", ConnectionID)
 			
-			NewStream := StreamConn{LastRemotePacAdd: RecivedFrom, StreamID: ConnectionID, pc: ServerUdpListener}
+			NewStream := &StreamConn{LastRemotePacAdd: RecivedFrom, StreamID: ConnectionID, pc: ServerUdpListener, PacketList:make(map[uint64][]byte) }
 			ServiceAddr := "localhost:1337"
 
 			//COnnect to service
@@ -167,13 +168,7 @@ func RunServer() {
 				go Pipe(Stream.ForwardConnection, DatWriter)
 			}
 			if RecivedPacket.Command == 2 {
-				Stream.LastRecivedPacketID = RecivedPacket.PacketID
-				fmt.Println(RecivedPacket.PacketID, "to server ssh ->", len(RecivedPacket.Data))
-				_, err = Stream.ForwardConnection.Write(RecivedPacket.Data)
-				if err != nil {
-					fmt.Println("error Writing packet to ssh server: ", err.Error())
-				}
-			
+				HandlePacketData(Stream, RecivedPacket, "server")
 			}
 		}else{
 			fmt.Println("Unknown Stream id", RecivedPacket.StreamID)
@@ -182,6 +177,50 @@ func RunServer() {
 		// Handle connections in a new goroutine.
 		//go handleIncommingTunnel(conn, ConnectionID)
 	}
+}
+
+func HandlePacketData(Stream * StreamConn, RecivedPacket * StreamPacket, ErrStr string){
+	var err error
+	if _, ok := Stream.PacketList[RecivedPacket.PacketID]; ok {
+		fmt.Println(RecivedPacket.PacketID, " Has allredy been recived")
+	}else{
+		Stream.PacketList[RecivedPacket.PacketID] = RecivedPacket.Data
+	}
+	var MinKey uint64 = 9999999999
+	var MaxKey uint64 = 0
+	for key, _ := range Stream.PacketList {
+		if MinKey > key {
+			MinKey = key
+		}
+		if MaxKey < key {
+			MaxKey = key
+		}
+	}
+		
+	//fmt.Println("MinKey:",MinKey, "MaxKey:", MaxKey, "LastForwardedPacketID:", Stream.LastForwardedPacketID, "PacketID:", RecivedPacket.PacketID)
+	
+	var i uint64
+	for i = MinKey; i<=MaxKey;i++ {
+		if Stream.LastForwardedPacketID + 1 == i || i == 0 {
+			if packetData, ok := Stream.PacketList[i]; ok {
+				//Stream.LastForwardedPacketID = RecivedPacket.PacketID
+				fmt.Println(RecivedPacket.PacketID, "to "+ErrStr+" ssh ->", len(RecivedPacket.Data))
+				_, err = Stream.ForwardConnection.Write(packetData)
+				if err != nil {
+					fmt.Println("error Writing packet to ssh "+ErrStr+": ", err.Error())
+				}
+				
+				//fmt.Println("i:",i)
+				Stream.LastForwardedPacketID = i
+				//fmt.Println("i:",i, "LastForwardedPacketID:", Stream.LastForwardedPacketID)
+				delete(Stream.PacketList, i)
+			}else{
+				fmt.Println("error missing packet:", i)
+			}
+		}
+	}
+
+	
 }
 
 func RunClient() {
@@ -238,8 +277,8 @@ func handleOutgoingTunnel(clinetConn net.Conn) {
 	defer ServerConn.Close()
 
 
-	Stream := &StreamConn{pc: ServerConn}
-	Stream.LastRemotePacAdd, err = net.ResolveUDPAddr("udp", "localhost:5356")
+	Stream := &StreamConn{pc: ServerConn, PacketList:make(map[uint64][]byte)}
+	Stream.LastRemotePacAdd, err = net.ResolveUDPAddr("udp", "localhost:5453")
 	Stream.ForwardConnection = clinetConn
 
 	//Request New Stream
@@ -269,16 +308,19 @@ func handleOutgoingTunnel(clinetConn net.Conn) {
 			ReqPack := &StreamPacket{Command: 11, StreamID: Stream.StreamID}
 			Stream.Write(ReqPack.Marchal())
 
-			DatWriter := &DataStream{ConfStream: *Stream}
+			DatWriter := &DataStream{ConfStream: Stream}
 			go Pipe(Stream.ForwardConnection, DatWriter)
 		}
 		if RecivedPacket.Command == 2 {
-			Stream.LastRecivedPacketID = RecivedPacket.PacketID
+			HandlePacketData(Stream, RecivedPacket, "client")
+/*
+			Stream.LastForwardedPacketID = RecivedPacket.PacketID
 			fmt.Println(RecivedPacket.PacketID ,"to client ssh ->", len(RecivedPacket.Data))
 			_, err = Stream.ForwardConnection.Write(RecivedPacket.Data)
 			if err != nil {
 				fmt.Println("error Writing packet to ssh connection: ", err.Error())
 			}
+*/
 		}
 	}
 }
