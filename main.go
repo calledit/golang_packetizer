@@ -43,13 +43,14 @@ type DataStream struct {
 
 func (Ds *DataStream) Write(b []byte) (n int, err error) {
 
+	fmt.Println(Ds.ConfStream.PacketID, "dataPacket over udp -> ")
+
 	DatPack := &StreamPacket{Command: 2, StreamID: Ds.ConfStream.StreamID, PacketID: Ds.ConfStream.PacketID, Data: b}
 	Ds.ConfStream.PacketID++
 	DatBytes := DatPack.Marchal()
 	Ds.ConfStream.OutgoingPacketList[DatPack.PacketID] = DatBytes
 
 	n = len(b)
-	fmt.Println("dataPacket -> ", n)
 	_, err = Ds.ConfStream.Write(DatBytes)
 	return
 }
@@ -178,8 +179,7 @@ func RunServer() {
 			}
 			if RecivedPacket.Command == 3 {
 				if PrevPacket, ok := Stream.OutgoingPacketList[RecivedPacket.PacketID]; ok {
-					DatPack := &StreamPacket{Command: 2, StreamID: Stream.StreamID, PacketID: RecivedPacket.PacketID, Data: PrevPacket}
-					Stream.Write(DatPack.Marchal())
+					Stream.Write(PrevPacket)
 				} else {
 					fmt.Println("Other side asked for unknown packet")
 				}
@@ -348,8 +348,7 @@ func handleOutgoingTunnel(clinetConn net.Conn) {
 		}
 		if RecivedPacket.Command == 3 {
 			if PrevPacket, ok := Stream.OutgoingPacketList[RecivedPacket.PacketID]; ok {
-				DatPack := &StreamPacket{Command: 2, StreamID: Stream.StreamID, PacketID: RecivedPacket.PacketID, Data: PrevPacket}
-				Stream.Write(DatPack.Marchal())
+				Stream.Write(PrevPacket)
 			} else {
 				fmt.Println("Other side asked for unknown packet")
 			}
