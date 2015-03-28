@@ -176,6 +176,14 @@ func RunServer() {
 			if RecivedPacket.Command == 2 {
 				HandlePacketData(Stream, RecivedPacket, "server")
 			}
+			if RecivedPacket.Command == 3 {
+				if PrevPacket, ok := Stream.OutgoingPacketList[RecivedPacket.PacketID]; ok {
+					DatPack := &StreamPacket{Command: 2, StreamID: Stream.StreamID, PacketID: RecivedPacket.PacketID, Data: PrevPacket}
+					Stream.Write(DatPack.Marchal())
+				} else {
+					fmt.Println("Other side asked for unknown packet")
+				}
+			}
 		} else {
 			fmt.Println("Unknown Stream id", RecivedPacket.StreamID)
 		}
@@ -184,20 +192,21 @@ func RunServer() {
 
 func ControllStream(Stream *StreamConn) bool {
 	fmt.Println("Controlling stream width id:", Stream.StreamID)
-	var MinKey uint64 = 9999999999
-	var MaxKey uint64 = 0
+	var MinKey uint64 = Stream.LastForwardedPacketID
+	var MaxKey uint64 = Stream.LastForwardedPacketID
 	for key, _ := range Stream.PacketList {
-		if MinKey > key {
-			MinKey = key
-		}
 		if MaxKey < key {
 			MaxKey = key
 		}
 	}
 	var i uint64
-	for i = MinKey; i <= MaxKey; i++ {
-		if _, ok := Stream.PacketList[i]; ok {
-			fmt.Println("Missing packetID:", i)
+	for i = MinKey; i < MaxKey; i++ {
+		if _, ok := Stream.PacketList[i]; !ok {
+			fmt.Println("Assking for missing packetID:", i)
+
+			//Ask for the packet
+			AskPack := &StreamPacket{Command: 3, StreamID: Stream.StreamID, PacketID: i}
+			Stream.Write(AskPack.Marchal())
 
 		}
 	}
@@ -234,12 +243,9 @@ func HandlePacketData(Stream *StreamConn, RecivedPacket *StreamPacket, ErrStr st
 	} else {
 		Stream.PacketList[RecivedPacket.PacketID] = RecivedPacket.Data
 	}
-	var MinKey uint64 = 9999999999
-	var MaxKey uint64 = 0
+	var MinKey uint64 = Stream.LastForwardedPacketID
+	var MaxKey uint64 = Stream.LastForwardedPacketID
 	for key, _ := range Stream.PacketList {
-		if MinKey > key {
-			MinKey = key
-		}
 		if MaxKey < key {
 			MaxKey = key
 		}
@@ -339,6 +345,14 @@ func handleOutgoingTunnel(clinetConn net.Conn) {
 		}
 		if RecivedPacket.Command == 2 {
 			HandlePacketData(Stream, RecivedPacket, "client")
+		}
+		if RecivedPacket.Command == 3 {
+			if PrevPacket, ok := Stream.OutgoingPacketList[RecivedPacket.PacketID]; ok {
+				DatPack := &StreamPacket{Command: 2, StreamID: Stream.StreamID, PacketID: RecivedPacket.PacketID, Data: PrevPacket}
+				Stream.Write(DatPack.Marchal())
+			} else {
+				fmt.Println("Other side asked for unknown packet")
+			}
 		}
 	}
 }
