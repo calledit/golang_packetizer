@@ -8,6 +8,7 @@ import (
 	"io"
 	"net"
 	"os"
+	"time"
 )
 
 const (
@@ -24,11 +25,16 @@ type StreamConn struct {
 	LastForwardedPacketID uint64
 	pc                    net.PacketConn
 	PacketList            map[uint64][]byte
+	OutgoingPacketList    map[uint64][]byte
+	IsClosed              bool
 }
 
 func (sc *StreamConn) Write(b []byte) (n int, err error) {
 	n, err = sc.pc.WriteTo(b, sc.LastRemotePacAdd)
 	return
+}
+func (sc *StreamConn) Close() {
+	sc.IsClosed = true
 }
 
 type DataStream struct {
@@ -39,10 +45,12 @@ func (Ds *DataStream) Write(b []byte) (n int, err error) {
 
 	DatPack := &StreamPacket{Command: 2, StreamID: Ds.ConfStream.StreamID, PacketID: Ds.ConfStream.PacketID, Data: b}
 	Ds.ConfStream.PacketID++
+	DatBytes := DatPack.Marchal()
+	Ds.ConfStream.OutgoingPacketList[DatPack.PacketID] = DatBytes
 
 	n = len(b)
 	fmt.Println("dataPacket -> ", n)
-	_, err = Ds.ConfStream.Write(DatPack.Marchal())
+	_, err = Ds.ConfStream.Write(DatBytes)
 	return
 }
 
@@ -129,16 +137,27 @@ func RunServer() {
 
 			fmt.Println("Client Requesting new Stream Sending them stream id:", ConnectionID)
 
-			NewStream := &StreamConn{LastRemotePacAdd: RecivedFrom, StreamID: ConnectionID, pc: ServerUdpListener, PacketList: make(map[uint64][]byte)}
+			NewStream := &StreamConn{LastRemotePacAdd: RecivedFrom, StreamID: ConnectionID, pc: ServerUdpListener, PacketList: make(map[uint64][]byte), OutgoingPacketList: make(map[uint64][]byte), IsClosed: false}
 			ServiceAddr := "localhost:1337"
 
 			//COnnect to service
 			NewStream.ForwardConnection, err = net.Dial("tcp", ServiceAddr)
 			if err != nil {
 				fmt.Println("Error connecting to Service:", err.Error())
+				NewStream.Close()
 				continue
 			}
 			defer NewStream.ForwardConnection.Close()
+
+			ticker := time.NewTicker(time.Second * 1)
+			go func() {
+				defer ticker.Stop()
+				for _ = range ticker.C {
+					if ControllStream(NewStream) {
+						return
+					}
+				}
+			}()
 
 			StreamMap[ConnectionID] = NewStream
 
@@ -152,7 +171,7 @@ func RunServer() {
 		if Stream, ok := StreamMap[RecivedPacket.StreamID]; ok {
 			if RecivedPacket.Command == 11 { //Client Says ok lets go
 				DatWriter := &DataStream{ConfStream: Stream}
-				go Pipe(Stream.ForwardConnection, DatWriter)
+				go Pipe(Stream.ForwardConnection, DatWriter, Stream)
 			}
 			if RecivedPacket.Command == 2 {
 				HandlePacketData(Stream, RecivedPacket, "server")
@@ -161,6 +180,28 @@ func RunServer() {
 			fmt.Println("Unknown Stream id", RecivedPacket.StreamID)
 		}
 	}
+}
+
+func ControllStream(Stream *StreamConn) bool {
+	fmt.Println("Controlling stream width id:", Stream.StreamID)
+	var MinKey uint64 = 9999999999
+	var MaxKey uint64 = 0
+	for key, _ := range Stream.PacketList {
+		if MinKey > key {
+			MinKey = key
+		}
+		if MaxKey < key {
+			MaxKey = key
+		}
+	}
+	var i uint64
+	for i = MinKey; i <= MaxKey; i++ {
+		if _, ok := Stream.PacketList[i]; ok {
+			fmt.Println("Missing packetID:", i)
+
+		}
+	}
+	return Stream.IsClosed
 }
 
 func RunClient() {
@@ -212,6 +253,7 @@ func HandlePacketData(Stream *StreamConn, RecivedPacket *StreamPacket, ErrStr st
 				_, err = Stream.ForwardConnection.Write(packetData)
 				if err != nil {
 					fmt.Println("error Writing packet to ssh "+ErrStr+": ", err.Error())
+					Stream.Close()
 				}
 
 				Stream.LastForwardedPacketID = i
@@ -253,9 +295,19 @@ func handleOutgoingTunnel(clinetConn net.Conn) {
 	}
 	defer ServerConn.Close()
 
-	Stream := &StreamConn{pc: ServerConn, PacketList: make(map[uint64][]byte)}
+	Stream := &StreamConn{pc: ServerConn, PacketList: make(map[uint64][]byte), OutgoingPacketList: make(map[uint64][]byte), IsClosed: false}
 	Stream.LastRemotePacAdd, err = net.ResolveUDPAddr("udp", "localhost:5453")
 	Stream.ForwardConnection = clinetConn
+
+	ticker := time.NewTicker(time.Second * 1)
+	go func() {
+		defer ticker.Stop()
+		for _ = range ticker.C {
+			if ControllStream(Stream) {
+				return
+			}
+		}
+	}()
 
 	//Request New Stream
 	RequestPack := &StreamPacket{Command: 10}
@@ -283,7 +335,7 @@ func handleOutgoingTunnel(clinetConn net.Conn) {
 			Stream.Write(ReqPack.Marchal())
 
 			DatWriter := &DataStream{ConfStream: Stream}
-			go Pipe(Stream.ForwardConnection, DatWriter)
+			go Pipe(Stream.ForwardConnection, DatWriter, Stream)
 		}
 		if RecivedPacket.Command == 2 {
 			HandlePacketData(Stream, RecivedPacket, "client")
@@ -291,18 +343,20 @@ func handleOutgoingTunnel(clinetConn net.Conn) {
 	}
 }
 
-func Pipe(from io.Reader, to io.Writer) {
+func Pipe(from io.Reader, to io.Writer, Stream *StreamConn) {
 	recivedData := make([]byte, STREAM_PACKET_SIZE) //Big enogh to get an full mtu
 	for {
 		amountOfData, err := from.Read(recivedData)
 		if err != nil {
 			fmt.Println("Error reading data:", err.Error())
+			Stream.Close()
 			return
 		}
 
 		amountOfSubmitedData, err := to.Write(recivedData[:amountOfData])
 		if err != nil {
 			fmt.Println("Error writing data:", err.Error())
+			Stream.Close()
 			return
 		}
 		if amountOfSubmitedData != amountOfData {
